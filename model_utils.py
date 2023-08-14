@@ -1,11 +1,12 @@
-from typing import Union
+from typing import Union, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 from torch.nn.common_types import _size_1_t
-import torch.functional as F
 
+FLAG_CAUSAL = False
 
 def print_module(model: nn.Module):
     for module in model.modules():
@@ -32,24 +33,40 @@ class Conv1DWithCausalBuffer(nn.Conv1d):
 
     ) -> None:
 
-        super().__init__(self, in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias,
+        super().__init__(in_channels, out_channels, kernel_size, stride,
+                         0 if FLAG_CAUSAL else padding,
+                         dilation, groups, bias,
                          padding_mode, device, dtype)
 
-        assert(isinstance(kernel_size, int)), "kernel_size must be int (not tuple)"
-        assert(isinstance(dilation, int)), "dilation must be int (not tuple)"
-        assert(isinstance(padding, int)), "padding must be int (not tuple)"
+        if FLAG_CAUSAL:
+            assert(isinstance(kernel_size, int)), "kernel_size must be int (not tuple)"
+            assert(isinstance(dilation, int)), "dilation must be int (not tuple)"
+            assert(isinstance(padding, int)), "padding must be int (not tuple)"
 
-        self.causal_buffer_length = (kernel_size-1) * dilation
-        self.causal_buffer = self.make_causal_buffer(self.causal_buffer_length)
-
-    def make_causal_buffer(self, buffer_length: int) -> Tensor:
-        self.register_buffer('causal_buffer', torch.zeros(buffer_length), persistent=False)
-        return self.get_buffer('causal_buffer')
+        self.original_padding = padding
+        self.causal_buffer_length = ((kernel_size-1) * dilation) // 2
+        self.device = device
+        assert(padding == self.causal_buffer_length), "Expecting the "
 
     def forward(self, x: Tensor) -> Tensor:
-        x = torch.cat((self.causal_buffer, x))
-        self.causal_buffer[:, :] = x[:, -self.causal_buffer_length:]
-        return super().forward(x)
+        print("I:", x.shape, x[0, 0, 0:2])
+        if FLAG_CAUSAL:
+            if not hasattr(self, 'causal_buffer'):
+                shape = list(x.shape)
+                shape[-1] = self.causal_buffer_length
+                self.register_buffer('causal_buffer', torch.zeros(shape), persistent=False)
+            else:
+                pass
+            buf = self.get_buffer('causal_buffer')
+
+            x = torch.cat((buf.to(x.get_device()), x), dim=-1)
+            x = F.pad(x, (0, self.causal_buffer_length))
+
+            buf[:,:, :] = x[:,:, -self.causal_buffer_length:]
+
+        x = super().forward(x)
+        print("O:", x.shape, x[0, 0, 0:2])
+        return x
 
 
 
